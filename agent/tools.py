@@ -1,133 +1,286 @@
+# lesson6/tools.py
+# ══════════════════════════════════════════════════════
+# ALL CUSTOM TOOLS — FIXED VERSION
+#
+# Fix 1: Updated from deprecated TavilySearchResults
+#         to new langchain-tavily TavilySearch
+# Fix 2: search_risk_signals now accepts BOTH
+#         "subject" and "query" parameters so it
+#         works whether called directly or via tools_node
+#
+# Install updated package first:
+#   pip install -U langchain-tavily
+# ══════════════════════════════════════════════════════
+
 import os
 from dotenv import load_dotenv
 from langchain_core.tools import tool
-from langchain_community.tools.tavily_search import TavilySearchResults
+
+# ── NEW IMPORT — replaces deprecated TavilySearchResults
+try:
+    from langchain_tavily import TavilySearch
+    TAVILY_NEW = True
+except ImportError:
+    # Fallback to old package if new one not installed yet
+    from langchain_community.tools.tavily_search import TavilySearchResults
+    TAVILY_NEW = False
+    print("⚠️  Using deprecated TavilySearchResults.")
+    print("   Run: pip install -U langchain-tavily")
 
 load_dotenv()
 
-# TOOL 1: General Web Search 
+
+# ══════════════════════════════════════════════════════
+# HELPER — creates Tavily client + runs search
+# Handles both old and new package transparently
+# ══════════════════════════════════════════════════════
+
+def _tavily_search(
+    query       : str,
+    max_results : int = 4,
+    search_depth: str = "basic",
+    topic       : str = "general"
+) -> list[dict]:
+    """
+    Runs a Tavily search and returns list of result dicts.
+    Handles both old and new langchain-tavily packages.
+    """
+    if TAVILY_NEW:
+        kwargs = dict(
+            max_results  = max_results,
+            search_depth = search_depth,
+            api_key      = os.getenv("TAVILY_API_KEY")
+        )
+        if topic != "general":
+            kwargs["topic"] = topic
+
+        client  = TavilySearch(**kwargs)
+        results = client.invoke({"query": query})
+
+        # New package returns list of dicts directly
+        if isinstance(results, list):
+            return results
+
+        # Sometimes returns dict with "results" key
+        if isinstance(results, dict):
+            return results.get("results", [])
+
+        return []
+
+    else:
+        # Old package fallback
+        kwargs = dict(
+            api_key      = os.getenv("TAVILY_API_KEY"),
+            max_results  = max_results,
+            search_depth = search_depth
+        )
+        if topic != "general":
+            kwargs["topic"] = topic
+
+        client  = TavilySearchResults(**kwargs)
+        results = client.invoke({"query": query})
+        return results if isinstance(results, list) else []
+
+
+def _format(results: list, tag: str) -> str:
+    """Formats raw Tavily results into a tagged string."""
+    if not results:
+        return "No results found."
+
+    out = ""
+    for i, r in enumerate(results, 1):
+        title   = r.get("title",   "No title")
+        url     = r.get("url",     "")
+        content = r.get("content", "")[:400]
+        out += f"[{tag} {i}] {title}\n"
+        out += f"    URL: {url}\n"
+        out += f"    {content}\n\n"
+    return out
+
+
+# ══════════════════════════════════════════════════════
+# TOOL 1: General Overview Search
+# ══════════════════════════════════════════════════════
 
 @tool
 def search_general(query: str) -> str:
     """
-    Search the web for general information about any topic.
-    Use for overview, background, and general facts.
-    Best for: Who is X, What is X, Overview of X.
+    Search for general overview and background information.
+    Use first to get a broad picture of the subject.
+    Best for: Who is X, What is X, History of X,
+    Overview of a company or person.
 
     Args:
-        query: search query string
+        query: general search query string
 
     Returns:
-        Formatted string of search results
+        Formatted string of overview search results
     """
-    tavily  = TavilySearchResults(
-        api_key     = os.getenv("TAVILY_API_KEY"),
-        max_results = 4,
-        search_depth= "basic"
+    results = _tavily_search(
+        query        = query,
+        max_results  = 4,
+        search_depth = "basic"
     )
-    results = tavily.invoke({"query": query})
-    output  = ""
-    for i, r in enumerate(results, 1):
-        output += f"[{i}] {r['title']}\n"
-        output += f"URL: {r['url']}\n"
-        output += f"{r['content'][:300]}\n\n"
-    return output or "No results found."
+    return _format(results, "OVERVIEW")
 
-# TOOL 2: News Search 
+
+# ══════════════════════════════════════════════════════
+# TOOL 2: News Search
+# ══════════════════════════════════════════════════════
 
 @tool
 def search_news(query: str) -> str:
     """
-    Search specifically for recent news and current events.
-    Use for: latest developments, recent controversies,
-    current status, news from the past year.
+    Search for recent news, current events, and latest
+    developments about the subject.
+    Use for anything that happened in the past 1-2 years.
+    Best for: recent changes, current status, latest news,
+    announcements, updates.
 
     Args:
-        query: news search query
+        query: news-focused search query string
 
     Returns:
         Formatted string of recent news results
     """
-    tavily  = TavilySearchResults(
-        api_key      = os.getenv("TAVILY_API_KEY"),
+    results = _tavily_search(
+        query        = query,
         max_results  = 4,
         search_depth = "advanced",
         topic        = "news"
     )
-    results = tavily.invoke({"query": query})
-    output  = ""
-    for i, r in enumerate(results, 1):
-        output += f"[NEWS {i}] {r['title']}\n"
-        output += f"URL: {r['url']}\n"
-        output += f"{r['content'][:300]}\n\n"
-    return output or "No news found."
+    return _format(results, "NEWS")
 
-# TOOL 3: Deep Research 
+
+# ══════════════════════════════════════════════════════
+# TOOL 3: Deep Research Search
+# ══════════════════════════════════════════════════════
 
 @tool
 def search_deep(query: str) -> str:
     """
-    Perform deep, thorough research on a specific aspect.
-    Use when general search didn't give enough detail.
-    Best for: financial data, technical details,
-    biographical details, company specifics.
+    Perform thorough deep research on a specific aspect
+    of the subject. Use when you need detailed information.
+    Best for: financial data, technical specifications,
+    detailed biography, founding history, specific events.
 
     Args:
-        query: detailed research query
+        query: specific and detailed search query string
 
     Returns:
-        Detailed research results string
+        Detailed research results as formatted string
     """
-    tavily  = TavilySearchResults(
-        api_key      = os.getenv("TAVILY_API_KEY"),
+    results = _tavily_search(
+        query        = query,
         max_results  = 5,
         search_depth = "advanced"
     )
-    results = tavily.invoke({"query": query})
-    output  = ""
-    for i, r in enumerate(results, 1):
-        output += f"[DEEP {i}] {r['title']}\n"
-        output += f"URL: {r['url']}\n"
-        output += f"{r['content'][:500]}\n\n"
-    return output or "No deep results found."
+    return _format(results, "DEEP")
 
 
+# ══════════════════════════════════════════════════════
 # TOOL 4: Risk Signals Search
+#
+# FIX: Now accepts both "subject" and "query" parameters.
+# tools_node passes "query", direct calls pass "subject".
+# Both work correctly.
+# ══════════════════════════════════════════════════════
 
 @tool
 def search_risk_signals(subject: str) -> str:
     """
-    Search specifically for risk signals: controversies,
-    legal issues, negative press, fraud allegations,
-    regulatory problems, or reputational concerns.
-    Always run this tool for any dossier subject.
+    Search specifically for risk signals and negative
+    information about the subject. ALWAYS call this tool
+    for any dossier subject being researched.
+
+    Finds: controversies, lawsuits, scandals, regulatory
+    issues, fraud allegations, negative press, ethical
+    concerns, safety violations, employee complaints.
 
     Args:
-        subject: name of person or company to check
+        subject: exact name of the person or company
+                 to search risk signals for
 
     Returns:
-        Risk signal findings as string
+        Risk signal findings as formatted string
     """
     queries = [
-        f"{subject} controversy scandal fraud allegations",
-        f"{subject} lawsuit regulatory investigation problem"
+        f"{subject} controversy scandal criticism allegations",
+        f"{subject} lawsuit legal regulatory investigation problem"
     ]
-    tavily  = TavilySearchResults(
-        api_key     = os.getenv("TAVILY_API_KEY"),
-        max_results = 3
-    )
-    output  = ""
-    for q in queries:
-        results = tavily.invoke({"query": q})
-        for r in results:
-            output += f"[RISK] {r['title']}\n"
-            output += f"{r['content'][:300]}\n\n"
-    return output or "No significant risk signals found."
 
-# All tools in a list for easy import
+    all_results = []
+    for q in queries:
+        results      = _tavily_search(
+            query       = q,
+            max_results = 3
+        )
+        all_results.extend(results)
+
+    return _format(all_results, "RISK") or "No significant risk signals found."
+
+
+# ══════════════════════════════════════════════════════
+# TOOL 5: Financial Search
+# ══════════════════════════════════════════════════════
+
+@tool
+def search_financials(query: str) -> str:
+    """
+    Search for financial information, funding rounds,
+    valuation, revenue figures, and investor details.
+    Use for companies or high-profile individuals.
+    Best for: net worth, funding history, revenue,
+    investors, IPO details, acquisitions, valuation.
+
+    Args:
+        query: finance-focused search query string
+
+    Returns:
+        Financial information results as formatted string
+    """
+    results = _tavily_search(
+        query        = query,
+        max_results  = 4,
+        search_depth = "advanced"
+    )
+    return _format(results, "FINANCIAL")
+
+
+# ══════════════════════════════════════════════════════
+# TOOL REGISTRY
+# Used by tools_node to look up tool functions by name.
+# All valid name aliases mapped to the correct function.
+# ══════════════════════════════════════════════════════
+
+TOOL_MAP = {
+    # Primary names (what planner_node should output)
+    "search_general"     : search_general,
+    "search_news"        : search_news,
+    "search_deep"        : search_deep,
+    "search_risk"        : search_risk_signals,
+    "search_financials"  : search_financials,
+
+    # Aliases (for robustness — LLM sometimes varies names)
+    "search_risk_signals": search_risk_signals,
+    "search_overview"    : search_general,
+    "search_background"  : search_general,
+    "search_recent"      : search_news,
+    "search_latest"      : search_news,
+}
+
+# ── Tools that take "subject" parameter ──────────────
+# tools_node checks this set to pass the right param name
+SUBJECT_TOOLS = {
+    "search_risk",
+    "search_risk_signals"
+}
+
+# ── Full list for agents that use .bind_tools() ───────
 ALL_TOOLS = [
     search_general,
     search_news,
     search_deep,
-    search_risk_signals
+    search_risk_signals,
+    search_financials
 ]
