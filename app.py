@@ -3,6 +3,9 @@
 # DOSSIER-AGENT — STREAMLIT WEB APPLICATION
 #
 # Run with: streamlit run app.py
+#
+# All imports use "agent" package (not "dossier_agent")
+# Graph variable is "agent_graph" (not "dossier_graph")
 # ══════════════════════════════════════════════════════
 
 import sys
@@ -14,6 +17,8 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import streamlit as st
+
+# ── ALL IMPORTS USE "agent" PACKAGE ──────────────────
 from agent.graph  import agent_graph
 from agent.state  import AgentState
 from agent.config import RISK_ICONS, VERDICT_ICONS, OUTPUTS_DIR
@@ -103,14 +108,14 @@ st.markdown("""
 
   /* ── Section headers ── */
   .section-header {
-    font-size    : 13px;
-    font-weight  : bold;
-    color        : #8b949e;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    margin       : 16px 0 8px 0;
-    border-bottom: 1px solid #21262d;
-    padding-bottom: 4px;
+    font-size      : 13px;
+    font-weight    : bold;
+    color          : #8b949e;
+    text-transform : uppercase;
+    letter-spacing : 1px;
+    margin         : 16px 0 8px 0;
+    border-bottom  : 1px solid #21262d;
+    padding-bottom : 4px;
   }
 
   /* ── Routing badge ── */
@@ -160,11 +165,15 @@ def node_card(label: str, status: str, detail: str = "") -> str:
         "failed" : "❌"
     }
     icon = icons.get(status, "•")
-    det  = f"<br><small style='color:#8b949e'>{detail}</small>" if detail else ""
-    return f"""
-    <div class='node-card node-{status}'>
-      {icon} <b>{label}</b>{det}
-    </div>"""
+    det  = (
+        f"<br><small style='color:#8b949e'>{detail}</small>"
+        if detail else ""
+    )
+    return (
+        f"<div class='node-card node-{status}'>"
+        f"{icon} <b>{label}</b>{det}"
+        f"</div>"
+    )
 
 
 def risk_badge(level: str) -> str:
@@ -173,17 +182,18 @@ def risk_badge(level: str) -> str:
 
 
 def stat_card(value: str, label: str) -> str:
-    return f"""
-    <div class='stat-card'>
-      <div class='stat-value'>{value}</div>
-      <div class='stat-label'>{label}</div>
-    </div>"""
+    return (
+        f"<div class='stat-card'>"
+        f"<div class='stat-value'>{value}</div>"
+        f"<div class='stat-label'>{label}</div>"
+        f"</div>"
+    )
 
 
 def load_history() -> list:
-    """Load all saved JSON dossiers from outputs/."""
+    """Load saved JSON dossiers from outputs/ folder."""
     os.makedirs(OUTPUTS_DIR, exist_ok=True)
-    files   = sorted(
+    files = sorted(
         [f for f in os.listdir(OUTPUTS_DIR) if f.endswith(".json")],
         reverse=True
     )[:15]
@@ -196,6 +206,27 @@ def load_history() -> list:
         except Exception:
             pass
     return history
+
+
+def build_initial_state(subject: str) -> AgentState:
+    """Returns a clean initial AgentState dict."""
+    return {
+        "subject"          : subject,
+        "subject_type"     : "",
+        "research_plan"    : [],
+        "search_queries"   : [],
+        "raw_findings"     : [],
+        "errors"           : [],
+        "search_count"     : 0,
+        "loop_count"       : 0,
+        "quality_score"    : 0,
+        "routing_decision" : "",
+        "quality_gaps"     : [],
+        "analyst_output"   : None,
+        "final_report"     : None,
+        "status"           : "",
+        "output_path"      : ""
+    }
 
 
 # ══════════════════════════════════════════════════════
@@ -214,153 +245,62 @@ NODE_LABELS = {
     "saver_node"    : "7. Save Results"
 }
 
+# Progress % and message shown when each node completes
+NODE_PROGRESS = {
+    "intake_node"   : (20,  "🧠 Intake done — planning research..."),
+    "planner_node"  : (30,  "📋 Plan ready — selecting tools..."),
+    "tools_node"    : (50,  "🔍 Searches complete — grading quality..."),
+    "grader_node"   : (62,  "⚖️  Graded — routing decision made..."),
+    "enricher_node" : (72,  "🔬 Enrichment complete..."),
+    "analyst_node"  : (82,  "🧩 Analysis done — writing report..."),
+    "writer_node"   : (93,  "✍️  Report written — saving..."),
+    "saver_node"    : (100, "✅ Complete!")
+}
+
 
 class NodeTracker:
-    """
-    Wraps the LangGraph graph to intercept node
-    executions and update Streamlit UI in real-time.
-    """
+    """Updates Streamlit UI as each node executes."""
 
     def __init__(self, placeholder):
         self.placeholder = placeholder
         self.statuses    = {k: "waiting" for k in NODE_LABELS}
         self.details     = {k: ""        for k in NODE_LABELS}
-        self.current     = None
         self._render()
 
     def _render(self):
         html = "<div style='padding:4px'>"
         for node_id, label in NODE_LABELS.items():
-            status = self.statuses[node_id]
-            detail = self.details[node_id]
-            html  += node_card(label, status, detail)
+            html += node_card(label, self.statuses[node_id],
+                              self.details[node_id])
         html += "</div>"
         self.placeholder.markdown(html, unsafe_allow_html=True)
 
     def start(self, node_id: str):
-        if self.current:
-            self.statuses[self.current] = "done"
-        self.current             = node_id
-        self.statuses[node_id]   = "running"
-        self.details[node_id]    = "Working..."
-        self._render()
+        if node_id in self.statuses:
+            self.statuses[node_id] = "running"
+            self.details[node_id]  = "Working..."
+            self._render()
 
     def done(self, node_id: str, detail: str = ""):
-        self.statuses[node_id] = "done"
-        self.details[node_id]  = detail
-        self._render()
-
-    def skip(self, node_id: str, detail: str = ""):
-        self.statuses[node_id] = "skipped"
-        self.details[node_id]  = detail
-        self._render()
+        if node_id in self.statuses:
+            self.statuses[node_id] = "done"
+            self.details[node_id]  = detail
+            self._render()
 
     def finish_all(self):
-        if self.current:
-            self.statuses[self.current] = "done"
+        for k in self.statuses:
+            if self.statuses[k] == "running":
+                self.statuses[k] = "done"
         self._render()
-
-
-# ══════════════════════════════════════════════════════
-# PIPELINE RUNNER
-# Runs the graph and updates UI node by node
-# ══════════════════════════════════════════════════════
-
-def run_pipeline(subject: str, tracker: NodeTracker) -> tuple[dict, float]:
-    """
-    Runs dossier_graph with stream() to track
-    which node is executing at each step.
-    """
-
-    initial: DossierState = {
-        "subject"          : subject,
-        "subject_type"     : "",
-        "research_angles"  : [],
-        "complexity"       : "",
-        "search_queries"   : [],
-        "raw_findings"     : [],
-        "errors"           : [],
-        "search_count"     : 0,
-        "loop_count"       : 0,
-        "quality_score"    : 0,
-        "routing_decision" : "",
-        "quality_gaps"     : [],
-        "analyst_output"   : None,
-        "final_report"     : None,
-        "status"           : "",
-        "output_path"      : ""
-    }
-
-    start       = time.time()
-    final_state = {}
-
-    # .stream() yields one dict per node execution
-    # key = node name, value = what that node returned
-    for step in dossier_graph.stream(initial):
-        node_name = list(step.keys())[0]
-        node_out  = step[node_name]
-
-        # Update tracker
-        tracker.start(node_name)
-
-        # Build detail string from node output
-        detail = ""
-        if node_name == "intake_node":
-            t      = node_out.get("subject_type", "?")
-            c      = node_out.get("complexity",   "?")
-            detail = f"Type: {t} | Complexity: {c}"
-
-        elif node_name == "planner_node":
-            q      = node_out.get("search_queries", [])
-            detail = f"{len(q)} queries planned"
-
-        elif node_name == "tools_node":
-            f      = node_out.get("raw_findings", [])
-            detail = f"{len(f)} tool results"
-
-        elif node_name == "grader_node":
-            sc     = node_out.get("quality_score",    "?")
-            rd     = node_out.get("routing_decision", "?")
-            detail = f"Score: {sc}/100 → {rd}"
-
-        elif node_name == "enricher_node":
-            detail = "Gap filled with deep search"
-
-        elif node_name == "analyst_node":
-            ao     = node_out.get("analyst_output")
-            rl     = ao.risk_level if ao else "?"
-            detail = f"Risk: {rl}"
-
-        elif node_name == "writer_node":
-            fr     = node_out.get("final_report")
-            conf   = fr.confidence if fr else "?"
-            detail = f"Confidence: {conf}/100"
-
-        elif node_name == "saver_node":
-            op     = node_out.get("output_path", "")
-            detail = f"Saved ✅" if op else "Save skipped"
-
-        tracker.done(node_name, detail)
-
-        # Accumulate final state
-        final_state.update(node_out)
-
-    tracker.finish_all()
-
-    # Re-run invoke to get complete final state
-    # (stream only gives per-node diffs)
-    complete = dossier_graph.invoke(initial)
-    elapsed  = round(time.time() - start, 1)
-
-    return complete, elapsed
 
 
 # ══════════════════════════════════════════════════════
 # REPORT DISPLAY
-# Renders the DossierReport in a rich UI
 # ══════════════════════════════════════════════════════
 
 def display_report(result: dict, elapsed: float):
+    """Renders the final DossierReport in a rich UI."""
+
     report = result.get("final_report")
     status = result.get("status", "unknown")
 
@@ -368,7 +308,7 @@ def display_report(result: dict, elapsed: float):
         st.error("❌ No report was generated.")
         return
 
-    # ── Top metrics bar ──────────────────────────────
+    # ── Top metrics row ───────────────────────────────
     st.markdown("---")
     c1, c2, c3, c4, c5 = st.columns(5)
 
@@ -389,7 +329,7 @@ def display_report(result: dict, elapsed: float):
         )
     with c4:
         st.markdown(
-            stat_card(str(report.searches_performed), "Searches"),
+            stat_card(str(result.get("search_count", 0)), "Searches"),
             unsafe_allow_html=True
         )
     with c5:
@@ -401,6 +341,9 @@ def display_report(result: dict, elapsed: float):
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ── Subject header ────────────────────────────────
+    verdict_color = (
+        "#3fb950" if status == "complete" else "#d29922"
+    )
     st.markdown(f"""
     <h2 style='color:#e6edf3; margin-bottom:4px;'>
         {report.subject}
@@ -410,19 +353,18 @@ def display_report(result: dict, elapsed: float):
         &nbsp;|&nbsp;
         {risk_badge(report.risk_level)}
         &nbsp;|&nbsp;
-        <span style='color:#{"3fb950" if status=="complete" else "d29922"}'>
-            {VERDICT_ICONS.get(status,"📋")} {status.upper()}
+        <span style='color:{verdict_color}'>
+            {VERDICT_ICONS.get(status, "📋")} {status.upper()}
         </span>
     </div>
     """, unsafe_allow_html=True)
 
     # ── Two column layout ─────────────────────────────
-    left, right = st.columns([3, 2])
+    left_col, right_col = st.columns([3, 2])
 
-    # ── LEFT COLUMN ───────────────────────────────────
-    with left:
+    # ── LEFT: Overview + Facts + Events ──────────────
+    with left_col:
 
-        # Overview
         st.markdown(
             "<div class='section-header'>📋 Overview</div>",
             unsafe_allow_html=True
@@ -433,7 +375,6 @@ def display_report(result: dict, elapsed: float):
             unsafe_allow_html=True
         )
 
-        # Key facts
         st.markdown(
             "<div class='section-header'>🔑 Key Facts</div>",
             unsafe_allow_html=True
@@ -446,19 +387,19 @@ def display_report(result: dict, elapsed: float):
                 unsafe_allow_html=True
             )
 
-        # Notable events
-        if report.notable_events:
+        # Notable events — only show if field exists
+        notable = getattr(report, "notable_events", [])
+        if notable:
             st.markdown(
                 "<div class='section-header'>📅 Notable Events</div>",
                 unsafe_allow_html=True
             )
-            for event in report.notable_events:
+            for event in notable:
                 st.markdown(f"• {event}")
 
-    # ── RIGHT COLUMN ──────────────────────────────────
-    with right:
+    # ── RIGHT: Risk + Relationships + Tags + Stats ────
+    with right_col:
 
-        # Risk assessment
         st.markdown(
             "<div class='section-header'>⚠️ Risk Assessment</div>",
             unsafe_allow_html=True
@@ -473,22 +414,25 @@ def display_report(result: dict, elapsed: float):
             unsafe_allow_html=True
         )
 
-        if report.risk_factors:
+        # Risk factors — only show if field exists
+        risk_factors = getattr(report, "risk_factors", [])
+        if risk_factors:
             st.markdown("<br>**Risk Factors:**")
-            for rf in report.risk_factors:
+            for rf in risk_factors:
                 st.markdown(
                     f"<div style='color:#f85149; font-size:13px;'>"
                     f"⚠️ {rf}</div>",
                     unsafe_allow_html=True
                 )
 
-        # Key relationships
-        if report.key_relationships:
+        # Key relationships — only show if field exists
+        key_relationships = getattr(report, "key_relationships", [])
+        if key_relationships:
             st.markdown(
                 "<div class='section-header'>🔗 Key Relationships</div>",
                 unsafe_allow_html=True
             )
-            for rel in report.key_relationships:
+            for rel in key_relationships:
                 st.markdown(
                     f"<div style='color:#79c0ff; font-size:13px;'>"
                     f"🔗 {rel}</div>",
@@ -513,48 +457,50 @@ def display_report(result: dict, elapsed: float):
         )
         rd = result.get("routing_decision", "write")
         qs = result.get("quality_score",    0)
-        er = len(result.get("errors", []))
+        er = len(result.get("errors",       []))
 
         st.markdown(f"""
         <div style='font-size:13px; color:#8b949e; line-height:2'>
           🔀 Final routing &nbsp;:
           <span class='route-badge'>{rd}</span><br>
-          📊 Quality score &nbsp;: <b style='color:#e6edf3'>{qs}/100</b><br>
-          ⚠️  Errors caught &nbsp;: <b style='color:#e6edf3'>{er}</b><br>
+          📊 Quality score &nbsp;:
+          <b style='color:#e6edf3'>{qs}/100</b><br>
+          ⚠️  Errors caught &nbsp;:
+          <b style='color:#e6edf3'>{er}</b><br>
           🔄 Search loops &nbsp;&nbsp;:
           <b style='color:#e6edf3'>{result.get("loop_count", 0)}</b>
         </div>
         """, unsafe_allow_html=True)
 
-    # ── Download ──────────────────────────────────────
+    # ── Download button ───────────────────────────────
     st.markdown("---")
 
     payload = {
-        "timestamp" : datetime.now().isoformat(),
-        "subject"   : report.subject,
-        "status"    : status,
-        "report"    : report.model_dump(),
+        "timestamp"  : datetime.now().isoformat(),
+        "subject"    : report.subject,
+        "status"     : status,
+        "report"     : report.model_dump(),
         "graph_stats": {
-            "searches"      : report.searches_performed,
-            "quality_score" : result.get("quality_score", 0),
-            "routing"       : rd
+            "searches"     : result.get("search_count", 0),
+            "quality_score": qs,
+            "routing"      : rd
         }
     }
 
-    col_dl, col_saved = st.columns([1, 3])
-    with col_dl:
+    dl_col, saved_col = st.columns([1, 3])
+    with dl_col:
         st.download_button(
-            label     = "💾 Download JSON Report",
-            data      = json.dumps(payload, indent=2),
-            file_name = f"dossier_{report.subject.replace(' ','_')}.json",
-            mime      = "application/json",
-            use_container_width=True
+            label               = "💾 Download JSON Report",
+            data                = json.dumps(payload, indent=2),
+            file_name           = (
+                f"dossier_{report.subject.replace(' ', '_')}.json"
+            ),
+            mime                = "application/json",
+            use_container_width = True
         )
-    with col_saved:
+    with saved_col:
         if result.get("output_path"):
-            st.success(
-                f"✅ Auto-saved: `{result['output_path']}`"
-            )
+            st.success(f"✅ Auto-saved: `{result['output_path']}`")
 
 
 # ══════════════════════════════════════════════════════
@@ -573,25 +519,23 @@ def render_sidebar():
         <hr style='border-color:#21262d'>
         """, unsafe_allow_html=True)
 
-        # About section
         with st.expander("ℹ️ How it works"):
             st.markdown("""
-**8-node LangGraph pipeline:**
+**Pipeline nodes:**
 
-1. **Intake** — classifies subject + plans research
-2. **Planner** — picks tools + writes queries  
+1. **Intake** — classifies + plans research
+2. **Planner** — picks tools + writes queries
 3. **Tools** — runs web searches
-4. **Grader** — scores quality → routes decision
+4. **Grader** — scores quality → routes
 5. **Enricher** — fills gaps *(if needed)*
 6. **Analyst** — deep risk analysis
-7. **Writer** — Pydantic structured report
-8. **Saver** — saves to JSON history
+7. **Writer** — structured report
+8. **Saver** — saves to JSON
 
 Built with LangChain + LangGraph + Groq
             """)
 
         st.markdown("### 📁 Recent Dossiers")
-
         history = load_history()
 
         if not history:
@@ -602,41 +546,41 @@ Built with LangChain + LangGraph + Groq
             report  = item.get("report", {})
             subject = item.get("subject", "Unknown")
             ts      = item.get("timestamp", "")
-            verdict = item.get("status", "?")
-            risk    = report.get("risk_level", "?")
-            conf    = report.get("confidence", "?")
+            verdict = item.get("status",    "?")
+            risk    = report.get("risk_level",  "?")
+            conf    = report.get("confidence",  "?")
 
-            risk_icon    = RISK_ICONS.get(risk, "⚪")
+            risk_icon    = RISK_ICONS.get(risk,    "⚪")
             verdict_icon = VERDICT_ICONS.get(verdict, "📋")
 
-            with st.expander(
-                f"{risk_icon} {subject[:25]}{'...' if len(subject)>25 else ''}"
-            ):
+            label = subject[:25] + ("..." if len(subject) > 25 else "")
+            with st.expander(f"{risk_icon} {label}"):
                 st.markdown(f"""
                 <div class='history-item'>
                   <div style='color:#e6edf3; font-weight:bold;'>
                     {subject}
                   </div>
-                  <div style='color:#8b949e; font-size:12px; margin-top:4px;'>
+                  <div style='color:#8b949e; font-size:12px;
+                              margin-top:4px;'>
                     {verdict_icon} {verdict.upper()} &nbsp;|&nbsp;
                     {risk_icon} {risk} &nbsp;|&nbsp;
                     📊 {conf}%
                   </div>
-                  <div style='color:#6e7681; font-size:11px; margin-top:2px;'>
+                  <div style='color:#6e7681; font-size:11px;
+                              margin-top:2px;'>
                     🕐 {ts}
                   </div>
                 </div>
                 """, unsafe_allow_html=True)
 
-                # Show key facts from history
                 facts = report.get("key_facts", [])[:3]
                 if facts:
                     st.markdown("**Top facts:**")
                     for f in facts:
+                        preview = f[:80] + ("..." if len(f) > 80 else "")
                         st.markdown(
                             f"<div style='font-size:12px; color:#8b949e;'>"
-                            f"• {f[:80]}{'...' if len(f)>80 else ''}"
-                            f"</div>",
+                            f"• {preview}</div>",
                             unsafe_allow_html=True
                         )
 
@@ -651,7 +595,7 @@ def main():
 
     # ── Header ────────────────────────────────────────
     st.markdown("""
-    <div style='text-align:center; padding: 20px 0 10px 0;'>
+    <div style='text-align:center; padding:20px 0 10px 0;'>
       <h1 style='color:#e6edf3; font-size:2.8em; margin-bottom:4px;'>
         🕵️ Dossier-Agent
       </h1>
@@ -662,34 +606,38 @@ def main():
         LangGraph · LangChain · Groq LLaMA 3.3 · Tavily
       </p>
     </div>
-    <hr style='border-color:#21262d; margin: 10px 0 20px 0;'>
+    <hr style='border-color:#21262d; margin:10px 0 20px 0;'>
     """, unsafe_allow_html=True)
 
-    # ── How it works bar ──────────────────────────────
+    # ── How it works ──────────────────────────────────
     with st.expander("💡 How it works — click to expand"):
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             st.markdown("""
             **🧠 Plan**
-            Intake node classifies your subject and builds a tailored research plan.
+            Intake node classifies your subject and builds
+            a tailored research plan.
             """)
         with c2:
             st.markdown("""
             **🔍 Search**
-            5 specialized tools search different angles — news, risk, financials, deep.
+            5 specialized tools search different angles —
+            news, risk, financials, deep research.
             """)
         with c3:
             st.markdown("""
             **⚖️ Grade & Route**
-            Quality grader scores findings and dynamically routes to enrich or write.
+            Quality grader scores findings and dynamically
+            routes to enrich or write.
             """)
         with c4:
             st.markdown("""
             **📋 Report**
-            Analyst + Writer produce a validated Pydantic dossier with risk scoring.
+            Analyst + Writer produce a validated dossier
+            with full risk scoring.
             """)
 
-    # ── Input section ─────────────────────────────────
+    # ── Input ─────────────────────────────────────────
     st.markdown("### 🔎 Enter a Subject to Research")
 
     col_in, col_btn = st.columns([5, 1])
@@ -711,25 +659,26 @@ def main():
     ex1, ex2, ex3, ex4, ex5 = st.columns(5)
 
     examples = [
-        ("👤 Sam Altman",    "Sam Altman"),
-        ("🏢 Mistral AI",    "Mistral AI"),
-        ("👤 Yann LeCun",    "Yann LeCun"),
-        ("🏢 Perplexity AI", "Perplexity AI"),
-        ("👤 Demis Hassabis","Demis Hassabis"),
+        ("👤 Sam Altman",     "Sam Altman"),
+        ("🏢 Mistral AI",     "Mistral AI"),
+        ("👤 Yann LeCun",     "Yann LeCun"),
+        ("🏢 Perplexity AI",  "Perplexity AI"),
+        ("👤 Demis Hassabis", "Demis Hassabis"),
     ]
 
-    for col, (label, value) in zip([ex1,ex2,ex3,ex4,ex5], examples):
+    for col, (label, value) in zip(
+        [ex1, ex2, ex3, ex4, ex5], examples
+    ):
         with col:
             if st.button(label, use_container_width=True):
                 subject = value
                 run_btn = True
 
-    # ── Run the pipeline ──────────────────────────────
+    # ── Run pipeline ──────────────────────────────────
     if run_btn and subject:
 
         st.markdown("---")
 
-        # Two column layout: tracker left, status right
         track_col, status_col = st.columns([2, 3])
 
         with track_col:
@@ -741,96 +690,81 @@ def main():
             st.markdown("### 📡 Live Status")
             progress   = st.progress(0, text="Initializing...")
             status_box = st.empty()
-            status_box.info(f"🚀 Starting research on: **{subject}**")
-
-        # Progress updates alongside node tracking
-        progress.progress(10, text="Intake & Planning...")
+            status_box.info(
+                f"🚀 Starting research on: **{subject}**"
+            )
 
         try:
-            # ── Run Pipeline ──────────────────────────
-            # We run invoke() directly for simplicity
-            # tracker updates via node prints in terminal
-            # For true live UI we use stream()
+            start_t      = time.time()
+            initial      = build_initial_state(subject)
+            final_result = dict(initial)
 
-            start_t = time.time()
+            # ── Stream node by node ───────────────────
+            for step in agent_graph.stream(initial):
 
-            # Stream through nodes
-            initial: DossierState = {
-                "subject"          : subject,
-                "subject_type"     : "",
-                "research_angles"  : [],
-                "complexity"       : "",
-                "search_queries"   : [],
-                "raw_findings"     : [],
-                "errors"           : [],
-                "search_count"     : 0,
-                "loop_count"       : 0,
-                "quality_score"    : 0,
-                "routing_decision" : "",
-                "quality_gaps"     : [],
-                "analyst_output"   : None,
-                "final_report"     : None,
-                "status"           : "",
-                "output_path"      : ""
-            }
-
-            node_progress = {
-                "intake_node"   : (20,  "🧠 Intake done — planning research..."),
-                "planner_node"  : (30,  "📋 Plan ready — selecting tools..."),
-                "tools_node"    : (50,  "🔍 Searches complete — grading quality..."),
-                "grader_node"   : (60,  "⚖️ Graded — routing decision made..."),
-                "enricher_node" : (70,  "🔬 Enrichment complete..."),
-                "analyst_node"  : (80,  "🧩 Analysis done — writing report..."),
-                "writer_node"   : (90,  "✍️ Report written — saving..."),
-                "saver_node"    : (100, "✅ Complete!")
-            }
-
-            final_result = None
-
-            for step in dossier_graph.stream(initial):
                 node_name = list(step.keys())[0]
                 node_out  = step[node_name]
 
-                # Update node tracker
+                # Start indicator
                 tracker.start(node_name)
 
-                # Build detail for this node
+                # Build per-node detail string
                 detail = ""
                 if node_name == "intake_node":
                     t      = node_out.get("subject_type", "?")
                     c      = node_out.get("complexity",   "?")
                     detail = f"Type: {t} | {c}"
+
+                elif node_name == "planner_node":
+                    q      = node_out.get("search_queries", [])
+                    detail = f"{len(q)} queries planned"
+
                 elif node_name == "tools_node":
                     n      = len(node_out.get("raw_findings", []))
                     detail = f"{n} results found"
+
                 elif node_name == "grader_node":
                     sc     = node_out.get("quality_score",    0)
                     rd     = node_out.get("routing_decision", "write")
                     detail = f"Score: {sc} → {rd}"
+
+                elif node_name == "enricher_node":
+                    detail = "Gap filled with deep search"
+
                 elif node_name == "analyst_node":
                     ao     = node_out.get("analyst_output")
                     detail = f"Risk: {ao.risk_level}" if ao else ""
+
                 elif node_name == "writer_node":
                     fr     = node_out.get("final_report")
-                    detail = f"Confidence: {fr.confidence}%" if fr else ""
+                    detail = (
+                        f"Confidence: {fr.confidence}%"
+                        if fr else ""
+                    )
+
+                elif node_name == "saver_node":
+                    op     = node_out.get("output_path", "")
+                    detail = "Saved ✅" if op else "Save skipped"
 
                 tracker.done(node_name, detail)
 
                 # Update progress bar
-                pct, msg = node_progress.get(node_name, (50, "Working..."))
+                pct, msg = NODE_PROGRESS.get(
+                    node_name, (50, "Working...")
+                )
                 progress.progress(pct, text=msg)
                 status_box.info(msg)
 
                 # Accumulate state
-                if final_result is None:
-                    final_result = dict(initial)
                 final_result.update(node_out)
 
             elapsed = round(time.time() - start_t, 1)
 
-            # Get complete state via invoke
-            complete_result = dossier_graph.invoke(initial)
-            complete_result["loop_count"] = final_result.get(
+            # ── Get complete final state via invoke ───
+            # stream() gives per-node diffs only;
+            # invoke() gives the full merged final state
+            complete = agent_graph.invoke(initial)
+            complete["loop_count"] = final_result.get(
                 "loop_count", 0
             )
 
@@ -839,8 +773,7 @@ def main():
                 f"✅ Dossier complete in **{elapsed}s**"
             )
 
-            # ── Show results ──────────────────────────
-            display_report(complete_result, elapsed)
+            display_report(complete, elapsed)
 
         except Exception as e:
             progress.empty()
@@ -849,7 +782,7 @@ def main():
             **Troubleshooting:**
             - Check `GROQ_API_KEY` in your `.env` file
             - Check `TAVILY_API_KEY` in your `.env` file
-            - Run from project root directory
+            - Run from the project root directory
             - Check terminal for detailed error logs
             """)
 
