@@ -5,7 +5,6 @@ from langchain_community.tools.tavily_search import TavilySearchResults
 
 load_dotenv()
 
-
 # TOOL 1: General Web Search 
 
 @tool
