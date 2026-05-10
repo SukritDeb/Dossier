@@ -232,12 +232,14 @@ TOOL_MAP = {
 }
 
 
+# ── Which tools take "subject" vs "query" ────────────
+SUBJECT_TOOLS = {"search_risk_signals", "search_risk"}
+
 def tools_node(state: AgentState) -> dict:
     print(f"\n📍 TOOLS NODE")
 
     tool_plan = state.get("_tool_plan", [])
 
-    # Fallback if no plan was set by planner
     if not tool_plan:
         tool_plan = [
             {"tool": "search_general", "query": state["subject"]},
@@ -254,8 +256,15 @@ def tools_node(state: AgentState) -> dict:
 
         try:
             print(f"   🔧 {tool_name}('{query[:50]}')")
-            result  = tool_fn.invoke({"query": query})
-            tagged  = f"[SOURCE: {tool_name}]\n{result}"
+
+            # ── KEY FIX: pass correct parameter name ──
+            # search_risk_signals uses "subject" not "query"
+            if tool_name in SUBJECT_TOOLS:
+                result = tool_fn.invoke({"subject": query})
+            else:
+                result = tool_fn.invoke({"query": query})
+
+            tagged = f"[SOURCE: {tool_name}]\n{result}"
             new_findings.append(tagged)
             print(f"      ✅ {len(result)} chars returned")
 
@@ -271,7 +280,6 @@ def tools_node(state: AgentState) -> dict:
         "errors"      : new_errors,
         "search_count": total
     }
-
 
 # ══════════════════════════════════════════════════════
 # NODE 4: GRADER
