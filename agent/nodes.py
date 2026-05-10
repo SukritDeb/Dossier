@@ -1,13 +1,3 @@
-# lesson6/nodes.py
-# ══════════════════════════════════════════════════════
-# ALL NODE FUNCTIONS — FIXED VERSION
-#
-# Fix applied: any prompt containing JSON examples
-# now uses SystemMessage(content=...) object instead
-# of ("system", "...") tuple to avoid LangChain's
-# f-string template parser crashing on { } braces.
-# ══════════════════════════════════════════════════════
-
 import os
 import json
 from typing import Literal
@@ -29,8 +19,6 @@ from agent.tools import (
 
 load_dotenv()
 
-
-# ── SHARED LLM INSTANCES ──────────────────────────────
 _llm = ChatGroq(
     api_key     = os.getenv("GROQ_API_KEY"),
     model       = "llama-3.3-70b-versatile",
@@ -44,28 +32,55 @@ _llm_writer = ChatGroq(
 )
 
 
-# ── SAFE CHAIN CALL ───────────────────────────────────
+# SAFE CHAIN CALL 
 def _safe(chain, inputs: dict, fallback):
-    """Runs a chain safely — returns fallback on any error."""
     try:
         return chain.invoke(inputs)
     except Exception as e:
-        print(f"   ⚠️  Chain error: {e}")
+        print(f"Chain error: {e}")
         return fallback
 
-
-# ══════════════════════════════════════════════════════
 # NODE 1: INTAKE
 # Classifies subject and builds a research plan
-# ══════════════════════════════════════════════════════
 
 def intake_node(state: AgentState) -> dict:
     print(f"\n{'═'*50}")
-    print(f"📍 INTAKE NODE")
-    print(f"   Subject: '{state['subject']}'")
+    print(f"INTAKE NODE")
 
-    # SystemMessage used here because the prompt contains
-    # JSON with { } that would confuse LangChain's parser
+    # Expand ambiguous single-word subjects
+    # "Elon" to "Elon Musk", "Tesla" stays "Tesla"
+    # Prevents searching for university instead of person
+    subject = state["subject"]
+
+    if len(subject.strip().split()) == 1:
+        try:
+            clarify = _llm.invoke(
+                f"What is the single most famous real-world "
+                f"person or company named '{subject}'? "
+                f"Reply with only the full proper name, "
+                f"nothing else. No punctuation. No explanation."
+            )
+            expanded = clarify.content.strip().strip('"').strip("'")
+
+            # Only use expansion if it's longer and looks valid
+            if (
+                expanded
+                and len(expanded) > len(subject)
+                and len(expanded) < 60
+                and "\n" not in expanded
+            ):
+                print(f"Expanded '{subject}' → '{expanded}'")
+                subject = expanded
+            else:
+                print(f"   Subject: '{subject}' (no expansion needed)")
+
+        except Exception as e:
+            print(f"Name expansion failed: {e}")
+            print(f"Subject: '{subject}' (using original)")
+
+    else:
+        print(f"Subject: '{subject}'")
+
     system_message = SystemMessage(content=(
         "You are an intelligence analyst intake specialist.\n"
         "Analyze the subject and create a research plan.\n\n"
@@ -79,8 +94,10 @@ def intake_node(state: AgentState) -> dict:
         "  ]\n"
         "}\n\n"
         "Research angles should be SPECIFIC:\n"
-        "- For a person: career, achievements, controversies, net worth\n"
-        "- For a company: products, revenue, leadership, competitors, news"
+        "- For a person  : career history, major achievements,\n"
+        "                  controversies, net worth, personal life\n"
+        "- For a company : products/services, revenue and funding,\n"
+        "                  leadership team, competitors, recent news"
     ))
 
     prompt = ChatPromptTemplate.from_messages([
@@ -90,15 +107,16 @@ def intake_node(state: AgentState) -> dict:
 
     try:
         chain  = prompt | _llm | JsonOutputParser()
-        result = chain.invoke({"subject": state["subject"]})
+        result = chain.invoke({"subject": subject})
 
         s_type = result.get("subject_type", "unknown")
-        plan   = result.get("research_plan", [state["subject"]])
+        plan   = result.get("research_plan", [subject])
 
         print(f"   Type  : {s_type}")
         print(f"   Plan  : {plan}")
 
         return {
+            "subject"         : subject,   
             "subject_type"    : s_type,
             "research_plan"   : plan,
             "search_count"    : 0,
@@ -106,24 +124,22 @@ def intake_node(state: AgentState) -> dict:
         }
 
     except Exception as e:
-        print(f"   ⚠️  Intake error: {e}")
+        print(f"Intake error: {e}")
         return {
+            "subject"         : subject,
             "subject_type"    : "unknown",
-            "research_plan"   : [f"general information about {state['subject']}"],
+            "research_plan"   : [f"general information about {subject}"],
             "search_count"    : 0,
             "errors"          : [f"intake_node: {str(e)}"],
             "status"          : "in_progress"
         }
 
-
-# ══════════════════════════════════════════════════════
 # NODE 2: PLANNER
 # Decides WHICH tools to call and with WHAT queries
-# ══════════════════════════════════════════════════════
 
 def planner_node(state: AgentState) -> dict:
-    print(f"\n📍 PLANNER NODE")
-    print(f"   Loop #{state.get('loop_count', 0) + 1}")
+    print(f"\n PLANNER NODE")
+    print(f"Loop #{state.get('loop_count', 0) + 1}")
 
     # Build gaps context string
     gaps_context = ""
@@ -216,11 +232,8 @@ def planner_node(state: AgentState) -> dict:
         "_tool_plan"    : tool_calls
     }
 
-
-# ══════════════════════════════════════════════════════
 # NODE 3: TOOLS
 # Executes the tool calls decided by planner
-# ══════════════════════════════════════════════════════
 
 TOOL_MAP = {
     "search_general"     : search_general,
@@ -232,7 +245,7 @@ TOOL_MAP = {
 }
 
 
-# ── Which tools take "subject" vs "query" ────────────
+# Which tools take "subject" vs "query" 
 SUBJECT_TOOLS = {"search_risk_signals", "search_risk"}
 
 def tools_node(state: AgentState) -> dict:
@@ -255,9 +268,7 @@ def tools_node(state: AgentState) -> dict:
         tool_fn   = TOOL_MAP.get(tool_name, search_general)
 
         try:
-            print(f"   🔧 {tool_name}('{query[:50]}')")
-
-            # ── KEY FIX: pass correct parameter name ──
+            print(f"{tool_name}('{query[:50]}')")
             # search_risk_signals uses "subject" not "query"
             if tool_name in SUBJECT_TOOLS:
                 result = tool_fn.invoke({"subject": query})
@@ -266,11 +277,11 @@ def tools_node(state: AgentState) -> dict:
 
             tagged = f"[SOURCE: {tool_name}]\n{result}"
             new_findings.append(tagged)
-            print(f"      ✅ {len(result)} chars returned")
+            print(f"{len(result)} chars returned")
 
         except Exception as e:
             new_errors.append(f"tools_node/{tool_name}: {str(e)}")
-            print(f"      ⚠️  Failed: {e}")
+            print(f"Failed: {e}")
 
     total = state.get("search_count", 0) + len(tool_plan)
     print(f"\n   Total findings: {len(new_findings)} tool results")
@@ -281,26 +292,22 @@ def tools_node(state: AgentState) -> dict:
         "search_count": total
     }
 
-# ══════════════════════════════════════════════════════
 # NODE 4: GRADER
 # Evaluates research quality → routing decision
-# ══════════════════════════════════════════════════════
 
 def grader_node(state: AgentState) -> dict:
-    print(f"\n📍 GRADER NODE")
+    print(f"\n GRADER NODE")
 
     # Safety valve — force write after enough searches
     if state.get("search_count", 0) >= 6:
-        print(f"   ⚠️  Max searches reached → forcing write")
+        print(f"Max searches reached → forcing write")
         return {
             "quality_score"   : 65,
             "routing_decision": "write"
         }
-
     findings_count = len(state.get("raw_findings", []))
-
     if findings_count == 0:
-        print(f"   ❌ No findings → re_search")
+        print(f"No findings → re_search")
         return {
             "quality_score"   : 0,
             "routing_decision": "re_search"
@@ -356,10 +363,7 @@ def grader_node(state: AgentState) -> dict:
         "routing_decision": decision
     }
 
-
-# ══════════════════════════════════════════════════════
 # ROUTER FUNCTION (not a node — called by LangGraph)
-# ══════════════════════════════════════════════════════
 
 def grade_router(
     state: AgentState
@@ -379,17 +383,14 @@ def grade_router(
     }
 
     destination = routes.get(decision, "writer_node")
-    print(f"\n   🔀 ROUTING: '{decision}' → '{destination}'")
+    print(f"\nROUTING: '{decision}' → '{destination}'")
     return destination
 
-
-# ══════════════════════════════════════════════════════
 # NODE 5: ENRICHER
 # Runs one targeted deep search to fill a gap
-# ══════════════════════════════════════════════════════
 
 def enricher_node(state: AgentState) -> dict:
-    print(f"\n📍 ENRICHER NODE")
+    print(f"\n ENRICHER NODE")
 
     existing = "\n".join(state.get("raw_findings", []))[:1000]
 
@@ -432,7 +433,7 @@ def enricher_node(state: AgentState) -> dict:
         deep_result = search_deep.invoke({"query": deep_query})
         enriched    = f"[ENRICHED - {missing}]\n{deep_result}"
 
-        print(f"   ✅ Enrichment complete ({len(deep_result)} chars)")
+        print(f"Enrichment complete ({len(deep_result)} chars)")
 
         return {
             "raw_findings"  : [enriched],
@@ -442,21 +443,18 @@ def enricher_node(state: AgentState) -> dict:
         }
 
     except Exception as e:
-        print(f"   ⚠️  Enricher error: {e}")
+        print(f"Enricher error: {e}")
         return {
             "errors"       : [f"enricher_node: {str(e)}"],
             "enriched_data": ""
         }
 
-
-# ══════════════════════════════════════════════════════
 # NODE 6: WRITER
 # Produces final structured DossierReport
-# ══════════════════════════════════════════════════════
 
 def writer_node(state: AgentState) -> dict:
-    print(f"\n📍 WRITER NODE")
-    print(f"   Writing from {len(state.get('raw_findings', []))} findings...")
+    print(f"\n WRITER NODE")
+    print(f"Writing from {len(state.get('raw_findings', []))} findings...")
 
     all_findings = "\n\n".join(state.get("raw_findings", []))[:4000]
 
@@ -507,7 +505,7 @@ def writer_node(state: AgentState) -> dict:
         # Validate with Pydantic
         report = DossierReport(**raw)
 
-        print(f"   ✅ Report validated — confidence {report.confidence}/100")
+        print(f"Report validated — confidence {report.confidence}/100")
 
         return {
             "final_report": report,
@@ -515,7 +513,7 @@ def writer_node(state: AgentState) -> dict:
         }
 
     except Exception as e:
-        print(f"   ⚠️  Writer error: {e}")
+        print(f"Writer error: {e}")
 
         # Fallback minimal report
         fallback = DossierReport(
