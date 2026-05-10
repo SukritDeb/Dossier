@@ -14,9 +14,9 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import streamlit as st
-from dossier_agent.graph  import dossier_graph
-from dossier_agent.state  import DossierState
-from dossier_agent.config import RISK_ICONS, VERDICT_ICONS, OUTPUTS_DIR
+from agent.graph  import agent_graph
+from agent.state  import AgentState
+from agent.config import RISK_ICONS, VERDICT_ICONS, OUTPUTS_DIR
 
 
 # ══════════════════════════════════════════════════════
