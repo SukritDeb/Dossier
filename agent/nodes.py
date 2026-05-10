@@ -1,12 +1,25 @@
+# lesson6/nodes.py
+# ══════════════════════════════════════════════════════
+# ALL NODE FUNCTIONS — FIXED VERSION
+#
+# Fix applied: any prompt containing JSON examples
+# now uses SystemMessage(content=...) object instead
+# of ("system", "...") tuple to avoid LangChain's
+# f-string template parser crashing on { } braces.
+# ══════════════════════════════════════════════════════
+
 import os
 import json
 from typing import Literal
 from dotenv import load_dotenv
+
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
-from agent.state  import AgentState, DossierReport
-from agent.tools  import (
+from langchain_core.messages import SystemMessage          # ← KEY FIX
+
+from agent.state import AgentState, DossierReport
+from agent.tools import (
     search_general,
     search_news,
     search_deep,
@@ -16,58 +29,74 @@ from agent.tools  import (
 
 load_dotenv()
 
-llm = ChatGroq(
+
+# ── SHARED LLM INSTANCES ──────────────────────────────
+_llm = ChatGroq(
     api_key     = os.getenv("GROQ_API_KEY"),
     model       = "llama-3.3-70b-versatile",
     temperature = 0.1
 )
 
-llm_creative = ChatGroq(
+_llm_writer = ChatGroq(
     api_key     = os.getenv("GROQ_API_KEY"),
     model       = "llama-3.3-70b-versatile",
-    temperature = 0.6  
+    temperature = 0.6
 )
 
+
+# ── SAFE CHAIN CALL ───────────────────────────────────
+def _safe(chain, inputs: dict, fallback):
+    """Runs a chain safely — returns fallback on any error."""
+    try:
+        return chain.invoke(inputs)
+    except Exception as e:
+        print(f"   ⚠️  Chain error: {e}")
+        return fallback
+
+
+# ══════════════════════════════════════════════════════
 # NODE 1: INTAKE
 # Classifies subject and builds a research plan
+# ══════════════════════════════════════════════════════
 
 def intake_node(state: AgentState) -> dict:
     print(f"\n{'═'*50}")
-    print(f"INTAKE NODE")
-    print(f"Subject: '{state['subject']}'")
+    print(f"📍 INTAKE NODE")
+    print(f"   Subject: '{state['subject']}'")
+
+    # SystemMessage used here because the prompt contains
+    # JSON with { } that would confuse LangChain's parser
+    system_message = SystemMessage(content=(
+        "You are an intelligence analyst intake specialist.\n"
+        "Analyze the subject and create a research plan.\n\n"
+        "Return ONLY valid JSON in this format:\n"
+        "{\n"
+        '  "subject_type": "person" or "company" or "unknown",\n'
+        '  "research_plan": [\n'
+        '    "angle 1 to research",\n'
+        '    "angle 2 to research",\n'
+        '    "angle 3 to research"\n'
+        "  ]\n"
+        "}\n\n"
+        "Research angles should be SPECIFIC:\n"
+        "- For a person: career, achievements, controversies, net worth\n"
+        "- For a company: products, revenue, leadership, competitors, news"
+    ))
 
     prompt = ChatPromptTemplate.from_messages([
-        (
-            "system",
-            """You are an intelligence analyst intake specialist.
-Analyze the subject and create a research plan.
-
-Return ONLY valid JSON:
-{{
-  "subject_type"  : "person" or "company" or "unknown",
-  "research_plan" : [
-    "angle 1 to research",
-    "angle 2 to research",
-    "angle 3 to research"
-  ]
-}}
-
-Research angles should be SPECIFIC:
-- For a person: career, achievements, controversies, net worth
-- For a company: products, revenue, leadership, competitors, news"""
-        ),
+        system_message,
         ("human", "Create intake analysis for: {subject}")
     ])
 
     try:
-        chain  = prompt | llm | JsonOutputParser()
+        chain  = prompt | _llm | JsonOutputParser()
         result = chain.invoke({"subject": state["subject"]})
 
         s_type = result.get("subject_type", "unknown")
         plan   = result.get("research_plan", [state["subject"]])
 
-        print(f"Type: {s_type}")
-        print(f"Plan: {plan}")
+        print(f"   Type  : {s_type}")
+        print(f"   Plan  : {plan}")
 
         return {
             "subject_type"    : s_type,
@@ -77,7 +106,7 @@ Research angles should be SPECIFIC:
         }
 
     except Exception as e:
-        print(f"Intake error: {e}")
+        print(f"   ⚠️  Intake error: {e}")
         return {
             "subject_type"    : "unknown",
             "research_plan"   : [f"general information about {state['subject']}"],
@@ -86,104 +115,133 @@ Research angles should be SPECIFIC:
             "status"          : "in_progress"
         }
 
+
+# ══════════════════════════════════════════════════════
 # NODE 2: PLANNER
-# Decides which tools to call and with what queries
+# Decides WHICH tools to call and with WHAT queries
+# ══════════════════════════════════════════════════════
 
 def planner_node(state: AgentState) -> dict:
-    print(f"\n PLANNER NODE")
+    print(f"\n📍 PLANNER NODE")
+    print(f"   Loop #{state.get('loop_count', 0) + 1}")
 
-    # tool descriptions for the LLM
-    tool_descriptions = """
-        Available tools:
-        - search_general     : overview and background facts
-        - search_news        : recent news and events
-        - search_deep        : detailed/technical deep research
-        - search_risk_signals: controversies, scandals, legal issues
-"""
+    # Build gaps context string
+    gaps_context = ""
+    if state.get("quality_gaps"):
+        gaps_context = (
+            "\n\nKNOWN GAPS TO FILL:\n" +
+            "\n".join(f"  - {g}" for g in state["quality_gaps"])
+        )
 
-    plan_text = "\n".join([
-        f"  {i+1}. {p}"
-        for i, p in enumerate(state.get("research_plan", []))
-    ])
+    # SystemMessage object — bypasses LangChain template
+    # parsing so JSON braces don't cause crashes
+    system_message = SystemMessage(content=(
+        "You are a research planner for an intelligence dossier.\n\n"
+        "Available tools:\n"
+        "  search_general     -> broad background facts\n"
+        "  search_news        -> recent news and events\n"
+        "  search_deep        -> detailed specific research\n"
+        "  search_risk        -> controversies and risk signals\n"
+        "  search_financials  -> financial data and funding\n\n"
+        "Return ONLY valid JSON in this EXACT format:\n"
+        "{\n"
+        '  "tool_calls": [\n'
+        '    {"tool": "tool_name", "query": "specific query"},\n'
+        '    {"tool": "tool_name", "query": "specific query"},\n'
+        '    {"tool": "tool_name", "query": "specific query"}\n'
+        "  ]\n"
+        "}\n\n"
+        "Rules:\n"
+        "- Always include search_risk (pass subject name as query)\n"
+        "- Always include search_news\n"
+        "- Max 4 tool calls total\n"
+        "- Make queries SPECIFIC and TARGETED\n"
+        "- If gaps exist, prioritize filling them"
+        + gaps_context
+    ))
 
     prompt = ChatPromptTemplate.from_messages([
-        (
-            "system",
-            f"""You are a research planner.
-Given a research plan, decide which tools to use.
-{tool_descriptions}
-
-Return ONLY valid JSON:
-{{
-  "tool_calls": [
-    {{"tool": "search_general",      "query": "specific query here"}},
-    {{"tool": "search_news",         "query": "specific query here"}},
-    {{"tool": "search_risk_signals", "query": "subject name only"}}
-  ]
-}}
-
-Always include search_risk_signals.
-Max 4 tool calls total. Make queries SPECIFIC."""
-        ),
+        system_message,
         (
             "human",
-            "Subject: {subject} ({subject_type})\n\n"
-            "Research plan:\n{plan}\n\n"
-            "Decide which tools to call."
+            "Subject: {subject} ({subject_type})\n"
+            "Complexity: {complexity}\n"
+            "Research angles:\n{angles}\n\n"
+            "Plan the tool calls now."
         )
     ])
 
-    try:
-        chain  = prompt | llm | JsonOutputParser()
-        result = chain.invoke({
+    chain = prompt | _llm | JsonOutputParser()
+
+    result = _safe(
+        chain,
+        {
             "subject"     : state["subject"],
             "subject_type": state.get("subject_type", "unknown"),
-            "plan"        : plan_text
-        })
-
-        tool_calls = result.get("tool_calls", [])
-        queries    = [tc["query"] for tc in tool_calls]
-
-        print(f"Planned {len(tool_calls)} tool calls:")
-        for tc in tool_calls:
-            print(f"{tc['tool']}('{tc['query'][:50]}')")
-
-        return {
-            "search_queries": queries,
-            "_tool_plan"    : tool_calls    # temp field for tools_node
+            "complexity"  : state.get("complexity",   "moderate"),
+            "angles"      : "\n".join([
+                f"  - {a}"
+                for a in state.get("research_plan", [state["subject"]])
+            ])
+        },
+        {
+            "tool_calls": [
+                {"tool": "search_general",
+                 "query": state["subject"]},
+                {"tool": "search_news",
+                 "query": f"{state['subject']} latest news 2025"},
+                {"tool": "search_risk",
+                 "query": state["subject"]}
+            ]
         }
+    )
 
-    except Exception as e:
-        print(f"Planner error: {e}")
-        # fallback plan
-        fallback_queries = [
-            f"{state['subject']} overview",
-            f"{state['subject']} news 2025"
+    tool_calls = result.get("tool_calls", [])
+
+    # Guard: fallback if result is malformed
+    if not isinstance(tool_calls, list) or not tool_calls:
+        tool_calls = [
+            {"tool": "search_general", "query": state["subject"]},
+            {"tool": "search_risk",    "query": state["subject"]}
         ]
-        return {
-            "search_queries": fallback_queries,
-            "errors": [f"planner_node: {str(e)}"]
-        }
 
+    queries = [tc.get("query", state["subject"]) for tc in tool_calls]
+
+    print(f"   Planned {len(tool_calls)} tool calls:")
+    for tc in tool_calls:
+        print(f"   → {tc.get('tool','?')}('{tc.get('query','')[:45]}')")
+
+    return {
+        "search_queries": queries,
+        "_tool_plan"    : tool_calls
+    }
+
+
+# ══════════════════════════════════════════════════════
 # NODE 3: TOOLS
-# Actually executes the tool calls from planner
+# Executes the tool calls decided by planner
+# ══════════════════════════════════════════════════════
 
 TOOL_MAP = {
     "search_general"     : search_general,
     "search_news"        : search_news,
     "search_deep"        : search_deep,
-    "search_risk_signals": search_risk_signals
+    "search_risk"        : search_risk_signals,
+    "search_risk_signals": search_risk_signals,
+    "search_financials"  : search_general,   # fallback to general
 }
 
+
 def tools_node(state: AgentState) -> dict:
-    print(f"\n TOOLS NODE")
-    # Get tool plan — if not set, fall back to queries
+    print(f"\n📍 TOOLS NODE")
+
     tool_plan = state.get("_tool_plan", [])
+
+    # Fallback if no plan was set by planner
     if not tool_plan:
-        # Fallback: use queries with search_general
         tool_plan = [
-            {"tool": "search_general", "query": q}
-            for q in state.get("search_queries", [])[-2:]
+            {"tool": "search_general", "query": state["subject"]},
+            {"tool": "search_risk",    "query": state["subject"]}
         ]
 
     new_findings = []
@@ -193,34 +251,39 @@ def tools_node(state: AgentState) -> dict:
         tool_name = call.get("tool", "search_general")
         query     = call.get("query", state["subject"])
         tool_fn   = TOOL_MAP.get(tool_name, search_general)
+
         try:
-            print(f"{tool_name}('{query[:50]}')")
-            result = tool_fn.invoke({"query": query})
-            # Tag each finding with its source tool
-            tagged = f"[SOURCE: {tool_name}]\n{result}"
+            print(f"   🔧 {tool_name}('{query[:50]}')")
+            result  = tool_fn.invoke({"query": query})
+            tagged  = f"[SOURCE: {tool_name}]\n{result}"
             new_findings.append(tagged)
-            print(f"{len(result)} chars returned")
+            print(f"      ✅ {len(result)} chars returned")
 
         except Exception as e:
             new_errors.append(f"tools_node/{tool_name}: {str(e)}")
-            print(f"Failed: {e}")
+            print(f"      ⚠️  Failed: {e}")
 
+    total = state.get("search_count", 0) + len(tool_plan)
     print(f"\n   Total findings: {len(new_findings)} tool results")
 
     return {
-        "raw_findings": new_findings,      
-        "errors": new_errors,       
-        "search_count": state.get("search_count", 0) + len(tool_plan)
+        "raw_findings": new_findings,
+        "errors"      : new_errors,
+        "search_count": total
     }
 
+
+# ══════════════════════════════════════════════════════
 # NODE 4: GRADER
 # Evaluates research quality → routing decision
+# ══════════════════════════════════════════════════════
 
 def grader_node(state: AgentState) -> dict:
-    print(f"\n GRADER NODE")
-    # Safety valve
+    print(f"\n📍 GRADER NODE")
+
+    # Safety valve — force write after enough searches
     if state.get("search_count", 0) >= 6:
-        print(f"Max searches reached → forcing write")
+        print(f"   ⚠️  Max searches reached → forcing write")
         return {
             "quality_score"   : 65,
             "routing_decision": "write"
@@ -229,33 +292,33 @@ def grader_node(state: AgentState) -> dict:
     findings_count = len(state.get("raw_findings", []))
 
     if findings_count == 0:
-        print(f"No findings → re_search")
+        print(f"   ❌ No findings → re_search")
         return {
             "quality_score"   : 0,
             "routing_decision": "re_search"
         }
-    # Sample findings for evaluation
+
     sample = "\n---\n".join(
         state["raw_findings"][:3]
     )[:1500]
 
+    # SystemMessage object avoids crash on JSON braces
+    system_message = SystemMessage(content=(
+        "You grade research quality for intelligence dossiers.\n\n"
+        "Return ONLY valid JSON in this format:\n"
+        "{\n"
+        '  "score": <integer 0-100>,\n'
+        '  "decision": "re_search" or "enrich" or "write",\n'
+        '  "reason": "one sentence"\n'
+        "}\n\n"
+        "Scoring guide:\n"
+        "  85-100 -> write      (rich, detailed, multi-source)\n"
+        "  60-84  -> enrich     (decent but missing some depth)\n"
+        "  0-59   -> re_search  (too thin or vague)"
+    ))
+
     prompt = ChatPromptTemplate.from_messages([
-        (
-            "system",
-            """You grade research quality for intelligence dossiers.
-
-Return ONLY valid JSON:
-{{
-  "score"    : <integer 0-100>,
-  "decision" : "re_search" or "enrich" or "write",
-  "reason"   : "one sentence"
-}}
-
-Scoring guide:
-  85-100 → write      (rich, detailed, multi-source)
-  60-84  → enrich     (decent but missing some depth)
-  0-59   → re_search  (too thin or vague)"""
-        ),
+        system_message,
         (
             "human",
             "Subject: {subject}\n"
@@ -265,45 +328,39 @@ Scoring guide:
         )
     ])
 
-    try:
-        chain  = prompt | llm | JsonOutputParser()
-        result = chain.invoke({
-            "subject": state["subject"],
-            "count"  : findings_count,
-            "sample" : sample
-        })
+    chain  = prompt | _llm | JsonOutputParser()
+    result = _safe(chain, {
+        "subject": state["subject"],
+        "count"  : findings_count,
+        "sample" : sample
+    }, {"score": 60, "decision": "write", "reason": "fallback"})
 
-        score    = int(result.get("score",    60))
-        decision = result.get("decision", "write")
-        reason   = result.get("reason",   "")
+    score    = int(result.get("score",    60))
+    decision = result.get("decision", "write")
+    reason   = result.get("reason",   "")
 
-        print(f"Score: {score}/100")
-        print(f"Decision: {decision}")
-        print(f"Reason: {reason}")
+    print(f"   Score    : {score}/100")
+    print(f"   Decision : {decision}")
+    print(f"   Reason   : {reason}")
 
-        return {
-            "quality_score": score,
-            "routing_decision": decision
-        }
+    return {
+        "quality_score"   : score,
+        "routing_decision": decision
+    }
 
-    except Exception as e:
-        print(f"Grader error: {e}")
-        return {
-            "quality_score"   : 60,
-            "routing_decision": "write",
-            "errors"          : [f"grader_node: {str(e)}"]
-        }
 
+# ══════════════════════════════════════════════════════
 # ROUTER FUNCTION (not a node — called by LangGraph)
+# ══════════════════════════════════════════════════════
 
 def grade_router(
     state: AgentState
 ) -> Literal["planner_node", "enricher_node", "writer_node"]:
     """
-    Reads routing_decision from grader and routes:
-    re_search - planner_node  (start search loop again)
-    enrich    - enricher_node (add specific depth)
-    write     - writer_node   (we have enough, write it)
+    Reads routing_decision and routes to:
+    re_search → planner_node  (loop back, search again)
+    enrich    → enricher_node (targeted gap filling)
+    write     → writer_node   (enough info, write report)
     """
     decision = state.get("routing_decision", "write")
 
@@ -317,24 +374,29 @@ def grade_router(
     print(f"\n   🔀 ROUTING: '{decision}' → '{destination}'")
     return destination
 
+
+# ══════════════════════════════════════════════════════
 # NODE 5: ENRICHER
-# Called when we have decent but not great research
-# Runs one targeted deep search based on gaps
+# Runs one targeted deep search to fill a gap
+# ══════════════════════════════════════════════════════
 
 def enricher_node(state: AgentState) -> dict:
     print(f"\n📍 ENRICHER NODE")
-    # Ask LLM what's missing
+
     existing = "\n".join(state.get("raw_findings", []))[:1000]
+
+    # SystemMessage object — JSON braces are literal here
+    system_message = SystemMessage(content=(
+        "You identify gaps in research findings.\n"
+        "Return ONLY valid JSON in this format:\n"
+        "{\n"
+        '  "missing_angle": "what is most missing",\n'
+        '  "deep_query": "specific search query to fill the gap"\n'
+        "}"
+    ))
+
     prompt = ChatPromptTemplate.from_messages([
-        (
-            "system",
-            """You identify gaps in research findings.
-Return ONLY valid JSON:
-{{
-  "missing_angle": "what is most missing",
-  "deep_query"   : "specific search query to fill the gap"
-}}"""
-        ),
+        system_message,
         (
             "human",
             "Subject: {subject}\n"
@@ -344,7 +406,7 @@ Return ONLY valid JSON:
     ])
 
     try:
-        chain  = prompt | llm | JsonOutputParser()
+        chain  = prompt | _llm | JsonOutputParser()
         result = chain.invoke({
             "subject" : state["subject"],
             "existing": existing
@@ -359,56 +421,62 @@ Return ONLY valid JSON:
         print(f"   Missing: {missing}")
         print(f"   Query  : '{deep_query}'")
 
-        # Run the deep search
         deep_result = search_deep.invoke({"query": deep_query})
         enriched    = f"[ENRICHED - {missing}]\n{deep_result}"
 
-        print(f"Enrichment complete ({len(deep_result)} chars)")
+        print(f"   ✅ Enrichment complete ({len(deep_result)} chars)")
 
         return {
-            "raw_findings"  : [enriched],       
-            "search_queries": [deep_query],   
-            "enriched_data" : enriched,
-            "search_count"  : state.get("search_count", 0) + 1
+            "raw_findings"  : [enriched],
+            "search_queries": [deep_query],
+            "search_count"  : state.get("search_count", 0) + 1,
+            "enriched_data" : enriched
         }
 
     except Exception as e:
-        print(f"Enricher error: {e}")
+        print(f"   ⚠️  Enricher error: {e}")
         return {
-            "errors": [f"enricher_node: {str(e)}"],
+            "errors"       : [f"enricher_node: {str(e)}"],
             "enriched_data": ""
         }
 
+
+# ══════════════════════════════════════════════════════
 # NODE 6: WRITER
 # Produces final structured DossierReport
+# ══════════════════════════════════════════════════════
 
 def writer_node(state: AgentState) -> dict:
-    print(f"\n WRITER NODE")
-    print(f"   Writing from {len(state.get('raw_findings',[]))} findings...")
+    print(f"\n📍 WRITER NODE")
+    print(f"   Writing from {len(state.get('raw_findings', []))} findings...")
+
     all_findings = "\n\n".join(state.get("raw_findings", []))[:4000]
 
+    # SystemMessage object — the JSON schema has many { }
+    # that would crash LangChain's template parser
+    system_message = SystemMessage(content=(
+        "You write structured intelligence dossiers.\n"
+        "Based on research findings, produce a JSON dossier.\n\n"
+        "Return ONLY valid JSON matching this EXACT structure:\n"
+        "{\n"
+        '  "subject": "full name",\n'
+        '  "subject_type": "person or company",\n'
+        '  "overview": "2-3 sentence overview",\n'
+        '  "key_facts": ["fact1", "fact2", "fact3", "fact4", "fact5"],\n'
+        '  "risk_level": "LOW or MEDIUM or HIGH",\n'
+        '  "risk_reason": "one sentence explaining risk level",\n'
+        '  "tags": ["tag1", "tag2", "tag3"],\n'
+        '  "confidence": <integer 0-100>,\n'
+        '  "sources_used": <integer>\n'
+        "}\n\n"
+        "Rules:\n"
+        "- key_facts must have EXACTLY 5 items\n"
+        "- confidence = how complete and consistent the research is\n"
+        "- sources_used = count of [SOURCE:...] blocks in findings"
+    ))
+
     prompt = ChatPromptTemplate.from_messages([
-        (
-            "system",
-            """You write structured intelligence dossiers.
-Based on research findings, produce a JSON dossier.
-
-Return ONLY valid JSON matching this EXACT structure:
-{{
-  "subject"      : "full name",
-  "subject_type" : "person or company",
-  "overview"     : "2-3 sentence overview",
-  "key_facts"    : ["fact1", "fact2", "fact3", "fact4", "fact5"],
-  "risk_level"   : "LOW or MEDIUM or HIGH",
-  "risk_reason"  : "one sentence explaining risk level",
-  "tags"         : ["tag1", "tag2", "tag3"],
-  "confidence"   : <integer 0-100>,
-  "sources_used" : <integer>
-}}
-
-Base confidence on how complete and consistent the research is.
-Base sources_used on number of source blocks in findings."""
-        ),
+        system_message,
         (
             "human",
             "Subject: {subject} ({subject_type})\n\n"
@@ -418,7 +486,7 @@ Base sources_used on number of source blocks in findings."""
     ])
 
     try:
-        chain  = prompt | llm | JsonOutputParser()
+        chain  = prompt | _llm_writer | JsonOutputParser()
         raw    = chain.invoke({
             "subject"     : state["subject"],
             "subject_type": state.get("subject_type", "unknown"),
@@ -430,7 +498,8 @@ Base sources_used on number of source blocks in findings."""
 
         # Validate with Pydantic
         report = DossierReport(**raw)
-        print(f"Report validated — confidence {report.confidence}/100")
+
+        print(f"   ✅ Report validated — confidence {report.confidence}/100")
 
         return {
             "final_report": report,
@@ -438,19 +507,30 @@ Base sources_used on number of source blocks in findings."""
         }
 
     except Exception as e:
-        print(f"Writer error: {e}")
+        print(f"   ⚠️  Writer error: {e}")
+
         # Fallback minimal report
         fallback = DossierReport(
             subject      = state["subject"],
             subject_type = state.get("subject_type", "unknown"),
-            overview     = f"Research completed for {state['subject']} with limited data.",
-            key_facts    = ["Insufficient data for detailed facts"],
+            overview     = (
+                f"Research completed for {state['subject']} "
+                f"with limited structured data."
+            ),
+            key_facts    = [
+                f"Subject: {state['subject']}",
+                "Full structured data unavailable",
+                "Research was attempted",
+                "Partial information gathered",
+                "Manual review recommended"
+            ],
             risk_level   = "MEDIUM",
             risk_reason  = "Insufficient data to assess risk accurately",
-            tags         = [state["subject"]],
+            tags         = [state["subject"], "research", "dossier"],
             confidence   = 20,
             sources_used = len(state.get("raw_findings", []))
         )
+
         return {
             "final_report": fallback,
             "status"      : "partial",
