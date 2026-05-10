@@ -2,11 +2,9 @@ import os
 import json
 from typing import Literal
 from dotenv import load_dotenv
-
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
-
 from agent.state  import AgentState, DossierReport
 from agent.tools  import (
     search_general,

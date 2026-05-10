@@ -29,8 +29,8 @@ def search_general(query: str) -> str:
     output  = ""
     for i, r in enumerate(results, 1):
         output += f"[{i}] {r['title']}\n"
-        output += f"    URL: {r['url']}\n"
-        output += f"    {r['content'][:300]}\n\n"
+        output += f"URL: {r['url']}\n"
+        output += f"{r['content'][:300]}\n\n"
     return output or "No results found."
 
 # TOOL 2: News Search 
@@ -58,8 +58,8 @@ def search_news(query: str) -> str:
     output  = ""
     for i, r in enumerate(results, 1):
         output += f"[NEWS {i}] {r['title']}\n"
-        output += f"    URL: {r['url']}\n"
-        output += f"    {r['content'][:300]}\n\n"
+        output += f"URL: {r['url']}\n"
+        output += f"{r['content'][:300]}\n\n"
     return output or "No news found."
 
 # TOOL 3: Deep Research 
@@ -87,8 +87,8 @@ def search_deep(query: str) -> str:
     output  = ""
     for i, r in enumerate(results, 1):
         output += f"[DEEP {i}] {r['title']}\n"
-        output += f"    URL: {r['url']}\n"
-        output += f"    {r['content'][:500]}\n\n"
+        output += f"URL: {r['url']}\n"
+        output += f"{r['content'][:500]}\n\n"
     return output or "No deep results found."
 
 
@@ -121,7 +121,7 @@ def search_risk_signals(subject: str) -> str:
         results = tavily.invoke({"query": q})
         for r in results:
             output += f"[RISK] {r['title']}\n"
-            output += f"    {r['content'][:300]}\n\n"
+            output += f"{r['content'][:300]}\n\n"
     return output or "No significant risk signals found."
 
 # All tools in a list for easy import
